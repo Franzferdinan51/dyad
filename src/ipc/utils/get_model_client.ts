@@ -463,7 +463,7 @@ function getRegularModelClient(
       };
     }
     case "duckhive": {
-      // DuckHive uses gRPC streaming with bidirectional chat
+      // DuckHive - auto-spawns API server for OpenAI-compatible access to 200+ models
       const provider = createDuckHiveProvider();
       return {
         modelClient: {

@@ -4,11 +4,11 @@
  * Integrates DuckHive as a backend AI provider. DuckHive supports
  * 200+ models via OpenAI-compatible API.
  *
- * This provider spawns a local DuckHive API server and connects to it
- * using the OpenAI-compatible interface.
+ * This provider auto-spawns a local DuckHive API server when needed.
  */
 
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import log from "electron-log";
 
 const logger = log.scope("duckhive_provider");
@@ -16,14 +16,125 @@ const logger = log.scope("duckhive_provider");
 // DuckHive API server configuration
 const DUCKHIVE_API_HOST = process.env.DUCKHIVE_API_HOST || "localhost";
 const DUCKHIVE_API_PORT = process.env.DUCKHIVE_API_PORT || "8080";
+const DUCKHIVE_API_BASE = `http://${DUCKHIVE_API_HOST}:${DUCKHIVE_API_PORT}/v1`;
+
+// Track server state
+let serverProcess: ChildProcessWithoutNullStreams | null = null;
+let serverStartPromise: Promise<void> | null = null;
+let serverReady = false;
 
 /**
- * Create a DuckHive provider that connects to DuckHive's API server.
+ * Check if DuckHive API server is running
+ */
+async function isServerRunning(): Promise<boolean> {
+  try {
+    const response = await fetch(`${DUCKHIVE_API_BASE}/models`, {
+      method: "GET",
+      signal: AbortSignal.timeout(2000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Start DuckHive API server as subprocess
+ */
+function startServerProcess(): ChildProcessWithoutNullStreams {
+  logger.info("Starting DuckHive API server subprocess...");
+
+  const duckhiveBin = process.env.DUCKHIVE_BIN || "duckhive";
+
+  const child = spawn(duckhiveBin, ["api-server", "--port", DUCKHIVE_API_PORT], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      // Disable TUI auto-launch to ensure API mode
+      DYAD_TUI_AUTO_LAUNCH: "false",
+    },
+  });
+
+  child.stdout?.on("data", (data: Buffer) => {
+    const output = data.toString();
+    logger.info(`DuckHive API: ${output.trim()}`);
+  });
+
+  child.stderr?.on("data", (data: Buffer) => {
+    const output = data.toString();
+    // Filter out common non-error messages
+    if (!output.includes("debug") && !output.includes("INFO")) {
+      logger.warn(`DuckHive API stderr: ${output.trim()}`);
+    }
+  });
+
+  child.on("error", (err) => {
+    logger.error(`DuckHive server error: ${err.message}`);
+    serverProcess = null;
+    serverReady = false;
+  });
+
+  child.on("exit", (code) => {
+    logger.info(`DuckHive server exited with code ${code}`);
+    serverProcess = null;
+    serverReady = false;
+  });
+
+  return child;
+}
+
+/**
+ * Wait for server to be ready by polling the health endpoint
+ */
+async function waitForServerReady(timeoutMs = 30000): Promise<void> {
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeoutMs) {
+    if (await isServerRunning()) {
+      serverReady = true;
+      logger.info("DuckHive API server is ready");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error("DuckHive server startup timeout");
+}
+
+/**
+ * Ensure DuckHive server is running, spawn if needed
+ */
+export async function ensureDuckHiveServerRunning(): Promise<void> {
+  // Check if already running
+  if (serverReady && serverProcess) {
+    return;
+  }
+
+  // If already starting, wait for it
+  if (serverStartPromise) {
+    return serverStartPromise;
+  }
+
+  // Check if server is already running (another instance)
+  if (await isServerRunning()) {
+    serverReady = true;
+    return;
+  }
+
+  // Start the server
+  serverStartPromise = (async () => {
+    serverProcess = startServerProcess();
+    await waitForServerReady();
+    serverStartPromise = null;
+  })();
+
+  return serverStartPromise;
+}
+
+/**
+ * Create a DuckHive provider that auto-spawns the API server if needed.
  *
- * DuckHive must be running in API mode:
- *   duckhive api-server --port 8080
- *
- * Or it will auto-start when needed.
+ * DuckHive supports 200+ models via OpenAI-compatible API.
  */
 export function createDuckHiveProvider(options?: {
   baseUrl?: string;
@@ -37,49 +148,44 @@ export function createDuckHiveProvider(options?: {
   return createOpenAICompatible({
     name: "duckhive",
     baseURL,
-    apiKey: options?.apiKey || "duckhive-api-key", // DuckHive may not need a real key
+    apiKey: options?.apiKey || "duckhive-api-key",
   });
 }
 
-// Keep the subprocess-based provider as an alternative for when API server isn't available
-export async function createDuckHiveSubprocessProvider(_modelId?: string) {
-  const { spawn } = await import("child_process");
-
-  // Spawn duckhive with API server mode
-  const duckhiveProcess = spawn("duckhive", ["api-server", "--port", DUCKHIVE_API_PORT], {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  return new Promise<void>((resolve, reject) => {
-    let ready = false;
-
-    duckhiveProcess.stdout?.on("data", (data: Buffer) => {
-      const output = data.toString();
-      logger.info(`DuckHive: ${output}`);
-      if (output.includes("running") || output.includes("listening")) {
-        ready = true;
-        resolve();
-      }
-    });
-
-    duckhiveProcess.stderr?.on("data", (data: Buffer) => {
-      logger.warn(`DuckHive stderr: ${data.toString()}`);
-    });
-
-    duckhiveProcess.on("error", reject);
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      if (!ready) {
-        duckhiveProcess.kill();
-        reject(new Error("DuckHive startup timeout"));
-      }
-    }, 30000);
-  });
+/**
+ * Get the DuckHive provider with auto-server-start.
+ * Use this when you need to ensure the server is running before creating a model.
+ */
+export async function getDuckHiveProvider(options?: {
+  baseUrl?: string;
+  apiKey?: string;
+}) {
+  await ensureDuckHiveServerRunning();
+  return createDuckHiveProvider(options);
 }
 
+/**
+ * Stop the DuckHive server if it's running
+ */
 export function stopDuckHiveServer(): void {
-  // This would need to track the spawned process
-  // For now, it's a placeholder
-  logger.info("Stopping DuckHive server (placeholder)");
+  if (serverProcess) {
+    logger.info("Stopping DuckHive API server");
+    serverProcess.kill();
+    serverProcess = null;
+    serverReady = false;
+    serverStartPromise = null;
+  }
+}
+
+/**
+ * Get server status for debugging
+ */
+export function getDuckHiveServerStatus(): {
+  running: boolean;
+  pid: number | null;
+} {
+  return {
+    running: serverReady,
+    pid: serverProcess?.pid ?? null,
+  };
 }

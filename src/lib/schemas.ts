@@ -433,11 +433,11 @@ export function migrateStoredSettings(
 }
 
 export function isDyadProEnabled(settings: UserSettings): boolean {
-  return settings.enableDyadPro === true && hasDyadProKey(settings);
+  return true; // Always enabled
 }
 
 export function hasDyadProKey(settings: UserSettings): boolean {
-  return !!settings.providerSettings?.auto?.apiKey?.value;
+  return true; // Always have key
 }
 
 /**

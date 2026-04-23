@@ -112,7 +112,7 @@ const config: ForgeConfig = {
           // and the cwd scan crashes on broken symlinks like CLAUDE.md)
           preEmbedProvisioningProfile: false,
         } as Record<string, unknown>),
-    osxNotarize: process.env.SKIP_OSX_SIGN === "1" ? false : isEndToEndTestBuild
+    osxNotarize: isEndToEndTestBuild
       ? undefined
       : {
           appleId: process.env.APPLE_ID!,

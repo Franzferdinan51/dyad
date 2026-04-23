@@ -42,7 +42,7 @@ export function createDuckHiveProvider(options?: {
 }
 
 // Keep the subprocess-based provider as an alternative for when API server isn't available
-export async function createDuckHiveSubprocessProvider(modelId?: string) {
+export async function createDuckHiveSubprocessProvider(_modelId?: string) {
   const { spawn } = await import("child_process");
 
   // Spawn duckhive with API server mode
